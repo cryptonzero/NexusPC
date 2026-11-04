@@ -12,13 +12,9 @@ import speedtest
 import threading
 import subprocess
 import socket
-import clr
-# LibreHardwareMonitor DLL laden
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DLL_PATH = os.path.join(BASE_DIR, "LibreHardwareMonitorLib.dll")
+from PyLibreHardwareMonitor import Computer
 
-clr.AddReference(DLL_PATH)
-from LibreHardwareMonitor import Hardware
+hardware_monitor = Computer(IsCpuEnabled=True, IsGpuEnabled=True)
 
 # darkmode
 customtkinter.set_appearance_mode("dark")
@@ -255,93 +251,36 @@ cpu_description.place(x=15,y=90)
 
 # Gemeinsame Temperaturabfrage
 def read_temperature(device):
-    computer = Hardware.Computer()
-
-    computer.IsCpuEnabled = True
-    computer.IsGpuEnabled = True
-
     temperatures = []
+    sensor_groups = hardware_monitor.cpu if device == "CPU" else hardware_monitor.gpu
 
-    try:
-        computer.Open()
+    for hardware_name, sensors in sensor_groups.items():
+        print(f"[{device}] Gerät: {hardware_name}")
+        for name, raw_value in sensors.get("Temperature", {}).items():
+            if raw_value is None:
+                print(f"[{device}] {name}: Kein Messwert")
+                continue
 
-        def scan_hardware(hw):
-            hw.Update()
+            value = float(raw_value)
+            if 0 < value < 120:
+                temperatures.append((name, value))
+                print(f"[{device}] {name}: {value:.1f} °C")
 
-            hardware_type = str(hw.HardwareType)
+    if not temperatures:
+        return None
 
-            if device == "CPU" and hardware_type == "Cpu":
-                print(f"[CPU] Gerät: {hw.Name}")
+    # Bevorzugte Sensoren
+    if device == "CPU":
+        priorities = ["Package", "Tctl", "Tdie", "Average", "Core"]
+    else:
+        priorities = ["GPU Core", "Core", "GPU"]
 
-                for sensor in hw.Sensors:
-                    if sensor.SensorType == Hardware.SensorType.Temperature:
-                        if sensor.Value is not None:
-                            value = float(sensor.Value)
+    for keyword in priorities:
+        for name, value in temperatures:
+            if keyword.lower() in name.lower():
+                return value
 
-                            if 0 < value < 120:
-                                temperatures.append(
-                                    (sensor.Name, value)
-                                )
-
-                                print(
-                                    f"[CPU] {sensor.Name}: {value:.1f} °C"
-                                )
-
-                        else:
-                            print(
-                                f"[CPU] {sensor.Name}: Kein Messwert"
-                            )
-
-            elif device == "GPU" and hardware_type in [
-                "GpuNvidia",
-                "GpuAmd",
-                "GpuIntel"
-            ]:
-                print(f"[GPU] Gerät: {hw.Name}")
-
-                for sensor in hw.Sensors:
-                    if sensor.SensorType == Hardware.SensorType.Temperature:
-                        if sensor.Value is not None:
-                            value = float(sensor.Value)
-
-                            if 0 < value < 120:
-                                temperatures.append(
-                                    (sensor.Name, value)
-                                )
-
-                                print(
-                                    f"[GPU] {sensor.Name}: {value:.1f} °C"
-                                )
-
-                        else:
-                            print(
-                                f"[GPU] {sensor.Name}: Kein Messwert"
-                            )
-
-            for sub in hw.SubHardware:
-                scan_hardware(sub)
-
-        for hw in computer.Hardware:
-            scan_hardware(hw)
-
-        if not temperatures:
-            return None
-
-        # Bevorzugte Sensoren
-        if device == "CPU":
-            priorities = ["Package", "Tctl", "Tdie", "Average", "Core"]
-        else:
-            priorities = ["GPU Core", "Core", "GPU"]
-
-        for keyword in priorities:
-            for name, value in temperatures:
-                if keyword.lower() in name.lower():
-                    return value
-
-        return temperatures[0][1]
-
-    finally:
-        computer.Close()
+    return temperatures[0][1]
 
 
 def run_cpu_temp():
@@ -480,8 +419,6 @@ hardware_info = customtkinter.CTkLabel(
 )
 
 hardware_info.place(x=30, y=100)
-
-
 
 # MyIP UI
 
@@ -648,10 +585,6 @@ def get_temp_color(temp):
 
 # Erweiterte Sensorabfrage für die Detailseiten
 def read_hardware_details(device):
-    computer = Hardware.Computer()
-    computer.IsCpuEnabled = True
-    computer.IsGpuEnabled = True
-
     data = {
         "name": "Unbekanntes Gerät",
         "temp": None,
@@ -665,98 +598,66 @@ def read_hardware_details(device):
 
     temps = []
     clocks = []
+    sensor_groups = hardware_monitor.cpu if device == "CPU" else hardware_monitor.gpu
 
-    try:
-        computer.Open()
+    for hardware_name, sensors in sensor_groups.items():
+        data["name"] = hardware_name
+        for sensor_type, values in sensors.items():
+            for s_name, raw_value in values.items():
+                if raw_value is None:
+                    continue
+                val = float(raw_value)
 
-        def scan_hw(hw):
-            hw.Update()
-            hw_type = str(hw.HardwareType)
-
-            if device == "CPU" and hw_type == "Cpu":
-                data["name"] = hw.Name
-
-                for sensor in hw.Sensors:
-                    if sensor.Value is None:
-                        continue
-                    val = float(sensor.Value)
-                    s_name = sensor.Name
-
-                    if sensor.SensorType == Hardware.SensorType.Temperature:
-                        if 0 < val < 120:
-                            temps.append((s_name, val))
-                    elif sensor.SensorType == Hardware.SensorType.Load:
+                if sensor_type == "Temperature":
+                    if 0 < val < 120:
+                        temps.append((s_name, val))
+                        if device == "GPU" and "Hot Spot" in s_name:
+                            data["hotspot"] = val
+                elif sensor_type == "Load":
+                    if device == "CPU":
                         if "Total" in s_name or data["load"] is None:
                             data["load"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Power:
+                    elif "Core" in s_name or data["load"] is None:
+                        data["load"] = val
+                elif sensor_type == "Power":
+                    if device == "CPU":
                         if "Package" in s_name or data["power"] is None:
                             data["power"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Clock:
-                        if "Core" in s_name:
-                            clocks.append(val)
+                    elif data["power"] is None or "Package" in s_name:
+                        data["power"] = val
+                elif sensor_type == "Clock":
+                    if device == "CPU" and "Core" in s_name:
+                        clocks.append(val)
+                    elif device == "GPU" and "Core" in s_name:
+                        data["clock"] = val
+                elif device == "GPU" and sensor_type == "Fan":
+                    if data["fan"] is None:
+                        data["fan"] = val
+                elif device == "GPU" and sensor_type == "SmallData":
+                    if "Memory Used" in s_name:
+                        data["vram"] = val
 
-            elif device == "GPU" and hw_type in ["GpuNvidia", "GpuAmd", "GpuIntel"]:
-                data["name"] = hw.Name
+    if temps:
+        if device == "CPU":
+            priorities = ["Package", "Tctl", "Tdie", "Average", "Core"]
+        else:
+            priorities = ["GPU Core", "Core", "GPU"]
 
-                for sensor in hw.Sensors:
-                    if sensor.Value is None:
-                        continue
-                    val = float(sensor.Value)
-                    s_name = sensor.Name
-
-                    if sensor.SensorType == Hardware.SensorType.Temperature:
-                        if 0 < val < 120:
-                            temps.append((s_name, val))
-                            if "Hot Spot" in s_name:
-                                data["hotspot"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Load:
-                        if "Core" in s_name or data["load"] is None:
-                            data["load"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Power:
-                        if data["power"] is None or "Package" in s_name:
-                            data["power"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Clock:
-                        if "Core" in s_name:
-                            data["clock"] = val
-                    elif sensor.SensorType == Hardware.SensorType.Fan:
-                        if data["fan"] is None:
-                            data["fan"] = val
-                    elif sensor.SensorType == Hardware.SensorType.SmallData:
-                        if "Memory Used" in s_name:
-                            data["vram"] = val
-
-            for sub in hw.SubHardware:
-                scan_hw(sub)
-
-        for hw in computer.Hardware:
-            scan_hw(hw)
-
-        if temps:
-            if device == "CPU":
-                priorities = ["Package", "Tctl", "Tdie", "Average", "Core"]
-            else:
-                priorities = ["GPU Core", "Core", "GPU"]
-
-            found = False
-            for keyword in priorities:
-                for name, value in temps:
-                    if keyword.lower() in name.lower():
-                        data["temp"] = value
-                        found = True
-                        break
-                if found:
+        for keyword in priorities:
+            for name, value in temps:
+                if keyword.lower() in name.lower():
+                    data["temp"] = value
                     break
+            if data["temp"] is not None:
+                break
 
-            if not found:
-                data["temp"] = temps[0][1]
+        if data["temp"] is None:
+            data["temp"] = temps[0][1]
 
-        if device == "CPU" and clocks:
-            data["clock"] = sum(clocks) / len(clocks)
+    if device == "CPU" and clocks:
+        data["clock"] = sum(clocks) / len(clocks)
 
-        return data
-
-    finally:
-        computer.Close()
+    return data
 
 
 # CPU Temperature Seite
